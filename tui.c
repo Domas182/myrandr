@@ -1,7 +1,6 @@
 #include <ncurses.h>
 #include <stdlib.h>
 #include <string.h>
-#include <signal.h> // For SIGWINCH
 #include <stdbool.h> // For bool type
 #include "xrandr_parser.h"
 
@@ -17,20 +16,6 @@ typedef enum {
     STATE_RATE_SELECT
 } AppState;
 
-// modified in a signal handler.
-volatile sig_atomic_t resized_flag = 0;
-
-/**
- * @brief Signal handler for SIGWINCH (window resize).
- *
- * This function simply sets a flag that the main loop can check.
- * @param sig The signal number (unused).
- */
-void handle_winch(int sig) {
-    (void)sig; // Unused parameter
-    resized_flag = 1;
-}
-
 /**
  * @brief Initializes ncurses with standard settings.
  */
@@ -40,7 +25,6 @@ void init_ncurses() {
     noecho();             
     keypad(stdscr, TRUE); 
     curs_set(0);          
-    timeout(100);         
 }
 
 /**
@@ -297,63 +281,53 @@ int main() {
     int monitor_scroll = 0;
     int mode_scroll = 0;
     int rate_scroll = 0;
-    // Register the signal handler for window resize, remember to make it work
-    signal(SIGWINCH, handle_winch);
 
     init_ncurses();
 
     int rows, cols;
+    bool needs_redraw = true;
 
     // --- Main Application Loop ---
     while (1) {
-        // Get terminal size
-        getmaxyx(stdscr, rows, cols);
+        if (needs_redraw) {
+            getmaxyx(stdscr, rows, cols);
+            clear();
 
-        // --- Handle Resize ---
-        if (resized_flag) {
-            // ncurses' own resize handling function, doesn't seem to work
-            resizeterm(rows, cols);
-            resized_flag = 0;
-            clear(); // Clear the screen to avoid artifacts
+            if (rows < MIN_ROWS || cols < MIN_COLS) {
+                draw_resize_message();
+            } else {
+                int monitor_view_height = rows - 4; // border + title
+                draw_border(rows, cols, state);
+                draw_monitor_list((const char **)menu_items, num_items, monitor_highlight, state == STATE_MONITOR_SELECT, monitor_scroll, monitor_view_height);
+
+                if (monitor_highlight < connected_count) {
+                    draw_right_panel(connected_displays[monitor_highlight], state,
+                                     mode_highlight, rate_highlight, mode_scroll, rate_scroll,
+                                     rows, cols);
+                } else {
+                    mvprintw(4, cols / 2, "Select to quit the application.");
+                }
+            }
+            refresh();
+            needs_redraw = false;
         }
-
-        // --- Check Minimum Size ---
-        if (rows < MIN_ROWS || cols < MIN_COLS) {
-            draw_resize_message();
-            // Wait for the next event (a key press or another resize)
-            getch();
-            continue; // Skip the loop and re-evaluate
-        }
-
-        // --- Drawing ---
-        clear();
-        int monitor_view_height = rows - 4; // border + title
-        draw_border(rows, cols, state);
-        draw_monitor_list((const char **)menu_items, num_items, monitor_highlight, state == STATE_MONITOR_SELECT, monitor_scroll, monitor_view_height);
-        
-        // If a display is highlighted (and it's not 'Exit'), show its info
-        if (monitor_highlight < connected_count) {
-            draw_right_panel(connected_displays[monitor_highlight], state, 
-                             mode_highlight, rate_highlight, mode_scroll, rate_scroll,
-                             rows, cols);
-        } else {
-            // Give info for the 'Exit' option when it's highlighted
-            mvprintw(4, cols / 2, "Select to quit the application.");
-        }
-
-        refresh();
 
         // --- Input Handling ---
-        int ch = getch(); // Blocks until key press or timeout
+        int ch = getch(); // This now blocks until a key is pressed or window is resized.
 
         switch (ch) {
             case 'q':
             case 'Q':
                 goto end_loop;
 
+            case KEY_RESIZE:
+                needs_redraw = true;
+                break;
+
             case KEY_UP:
             case 'k':
                 { // Use a block to create block-scoped variables
+                    int monitor_view_height = rows - 4;
                     int right_panel_view_height = rows - 8; // Approximate height for right-side lists
                     if (right_panel_view_height < 1) right_panel_view_height = 1;
 
@@ -389,11 +363,13 @@ int main() {
                         }
                     }
                 }
+                needs_redraw = true;
                 break;
 
             case KEY_DOWN:
             case 'j':
                 { // Use a block to create block-scoped variables
+                    int monitor_view_height = rows - 4;
                     int right_panel_view_height = rows - 8; // Approximate height for right-side lists
                     if (right_panel_view_height < 1) right_panel_view_height = 1;
 
@@ -429,6 +405,7 @@ int main() {
                         }
                     }
                 }
+                needs_redraw = true;
                 break;
 
             case KEY_RIGHT:
@@ -437,11 +414,13 @@ int main() {
                     state = STATE_MODE_SELECT;
                     mode_highlight = 0; mode_scroll = 0;
                     rate_highlight = 0; rate_scroll = 0;
+                    needs_redraw = true;
                 } else if (state == STATE_MODE_SELECT) {
                     Display* d = connected_displays[monitor_highlight];
                     if (d->mode_count > 0) {
                         state = STATE_RATE_SELECT;
                         rate_highlight = 0; rate_scroll = 0;
+                        needs_redraw = true;
                     }
                 }
                 break;
@@ -451,9 +430,11 @@ int main() {
                 if (state == STATE_RATE_SELECT) {
                     state = STATE_MODE_SELECT;
                     rate_highlight = 0; rate_scroll = 0;
+                    needs_redraw = true;
                 } else if (state == STATE_MODE_SELECT) {
                     state = STATE_MONITOR_SELECT;
                     mode_highlight = 0; mode_scroll = 0;
+                    needs_redraw = true;
                 }
                 break;
 
@@ -463,9 +444,11 @@ int main() {
                     state = STATE_MODE_SELECT;
                     mode_highlight = 0; mode_scroll = 0;
                     rate_highlight = 0; rate_scroll = 0;
+                    needs_redraw = true;
                 } else if (state == STATE_MODE_SELECT && connected_displays[monitor_highlight]->mode_count > 0) {
                     state = STATE_RATE_SELECT;
                     rate_highlight = 0; rate_scroll = 0;
+                    needs_redraw = true;
                 } else if (state == STATE_RATE_SELECT) {
                     // Get selected items
                     Display* selected_display = connected_displays[monitor_highlight];
@@ -490,12 +473,8 @@ int main() {
                     monitor_highlight = 0; monitor_scroll = 0;
                     mode_highlight = 0; mode_scroll = 0;
                     rate_highlight = 0; rate_scroll = 0;
-                    clear(); // Force a full redraw on the next iteration
+                    needs_redraw = true;
                 }
-                break;
-            case ERR:
-                // No input, timeout occurred. Loop will continue,
-                // can use for checking the resize flag.
                 break;
         }
     }
