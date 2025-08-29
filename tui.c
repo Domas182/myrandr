@@ -13,8 +13,17 @@
 typedef enum {
     STATE_MONITOR_SELECT,
     STATE_MODE_SELECT,
-    STATE_RATE_SELECT
+    STATE_RATE_SELECT,
+    STATE_POSITION_SELECT
 } AppState;
+
+/**
+ * @brief For the position selection panel, which sub-panel is active.
+ */
+typedef enum {
+    POS_PANEL_TARGET,
+    POS_PANEL_DIRECTION
+} PositionPanelFocus;
 
 /**
  * @brief Initializes ncurses with standard settings.
@@ -49,12 +58,15 @@ void draw_border(int rows, int cols, AppState state) {
         case STATE_MODE_SELECT:
             help_text = "j/k: Select Mode | h/Left: Back | l/Right/Enter: Select Rate | q: Quit";
             break;
+        case STATE_POSITION_SELECT:
+            help_text = "j/k: Select | Tab: Switch | h/Left: Back | Enter: Apply | q: Quit";
+            break;
         case STATE_RATE_SELECT:
             help_text = "j/k: Select Rate | h/Left: Back | Enter: Apply | q: Quit";
             break;
         case STATE_MONITOR_SELECT:
         default:
-            help_text = "j/k: Select Display | o: On/Off | l/Right/Enter: Select Modes | q: Quit";
+            help_text = "j/k: Select Display | o: On/Off | p: Position | l/Right/Enter: Modes | q: Quit";
             break;
     }
     mvprintw(rows - 1, 2, " %s ", help_text);
@@ -93,10 +105,51 @@ void draw_monitor_list(Display *displays[], int display_count, int total_items, 
     }
 }
 
+void draw_position_panel(
+    const Display* source_display,
+    Display** target_displays, int target_count,
+    const char** directions, int direction_count,
+    int target_highlight, int direction_highlight,
+    PositionPanelFocus active_panel,
+    int y, int start_col)
+{
+    mvprintw(y++, start_col, "Positioning '%s' relative to:", source_display->name);
+    y++;
+
+    int target_col = start_col;
+    int dir_col = start_col + 20;
+
+    // Draw target monitors list
+    mvprintw(y, target_col, "Target Monitor:");
+    bool target_active = (active_panel == POS_PANEL_TARGET);
+    if (!target_active) wattron(stdscr, A_DIM);
+    for (int i = 0; i < target_count; i++) {
+        if (i == target_highlight) wattron(stdscr, target_active ? A_REVERSE : A_BOLD);
+        mvprintw(y + 1 + i, target_col + 2, "%s", target_displays[i]->name);
+        if (i == target_highlight) wattroff(stdscr, target_active ? A_REVERSE : A_BOLD);
+    }
+    if (!target_active) wattroff(stdscr, A_DIM);
+
+
+    // Draw direction list
+    mvprintw(y, dir_col, "Position:");
+    bool dir_active = (active_panel == POS_PANEL_DIRECTION);
+    if (!dir_active) wattron(stdscr, A_DIM);
+    for (int i = 0; i < direction_count; i++) {
+        if (i == direction_highlight) wattron(stdscr, dir_active ? A_REVERSE : A_BOLD);
+        mvprintw(y + 1 + i, dir_col + 2, "%s", directions[i]);
+        if (i == direction_highlight) wattroff(stdscr, dir_active ? A_REVERSE : A_BOLD);
+    }
+    if (!dir_active) wattroff(stdscr, A_DIM);
+}
+
 /**
  * @brief Draws the right-hand panel, which shows display info, modes, and rates.
  */
-void draw_right_panel(const Display *display, AppState state, int mode_highlight, int rate_highlight, int mode_scroll, int rate_scroll, int rows, int cols) {
+void draw_right_panel(const Display *display, AppState state, int mode_highlight, int rate_highlight, int mode_scroll, int rate_scroll,
+                      Display** pos_targets, int pos_target_count, int pos_target_highlight,
+                      const char** pos_directions, int pos_direction_count, int pos_direction_highlight, PositionPanelFocus pos_focus,
+                      int rows, int cols) {
     int start_col = cols / 3;
     int y = 2;
 
@@ -131,7 +184,13 @@ void draw_right_panel(const Display *display, AppState state, int mode_highlight
     y++;
 
     if (state == STATE_MONITOR_SELECT) {
-        mvprintw(y, start_col, "Press 'l' or Enter to see modes.");
+        mvprintw(y++, start_col, "Press 'l' or Enter to see modes.");
+        mvprintw(y, start_col, "Press 'p' to change position.");
+        return;
+    }
+
+    if (state == STATE_POSITION_SELECT) {
+        draw_position_panel(display, pos_targets, pos_target_count, pos_directions, pos_direction_count, pos_target_highlight, pos_direction_highlight, pos_focus, y, start_col);
         return;
     }
 
@@ -194,6 +253,29 @@ void toggle_display_power(const Display* display) {
     getchar(); // Wait for user
 
     reset_prog_mode(); // Restore terminal state
+}
+
+/**
+ * @brief Executes the xrandr command to apply the selected position.
+ * @param source_display The display to move.
+ * @param target_display The reference display.
+ * @param direction The relative position (e.g., "left-of").
+ */
+void apply_position_settings(const Display* source_display, const Display* target_display, const char* direction) {
+    char command[256];
+    snprintf(command, sizeof(command), "xrandr --output %s --%s %s --auto",
+             source_display->name, direction, target_display->name);
+
+    // Temporarily leave ncurses to run the command
+    def_prog_mode();
+    endwin();
+
+    printf("Running command: %s\n", command);
+    system(command);
+    printf("Press Enter to return to the application.");
+    getchar();
+
+    reset_prog_mode();
 }
 
 /**
@@ -312,6 +394,15 @@ int main() {
     int mode_scroll = 0;
     int rate_scroll = 0;
 
+    // State for positioning panel
+    PositionPanelFocus pos_panel_focus = POS_PANEL_TARGET;
+    int pos_target_highlight = 0;
+    int pos_direction_highlight = 0;
+    Display **position_target_displays = NULL;
+    int position_target_count = 0;
+    const char *position_directions[] = {"right-of", "left-of", "above", "below", "same-as"};
+    const int position_direction_count = sizeof(position_directions) / sizeof(char*);
+
     init_ncurses();
 
     int rows, cols;
@@ -333,6 +424,8 @@ int main() {
                 if (monitor_highlight < connected_count) {
                     draw_right_panel(connected_displays[monitor_highlight], state,
                                      mode_highlight, rate_highlight, mode_scroll, rate_scroll,
+                                     position_target_displays, position_target_count, pos_target_highlight,
+                                     (const char**)position_directions, position_direction_count, pos_direction_highlight, pos_panel_focus,
                                      rows, cols);
                 } else {
                     mvprintw(4, cols / 2, "Select to quit the application.");
@@ -358,6 +451,7 @@ int main() {
 
                     // Reparse and rebuild menus with the new/updated data
                     cleanup_display_data(displays, display_count, menu_items, connected_displays);
+                    free(position_target_displays);
                     if (!setup_display_data(&displays, &display_count, &menu_items, &num_items, &connected_displays, &connected_count)) {
                         cleanup_ncurses();
                         fprintf(stderr, "Failed to re-parse xrandr data after toggling display.\n");
@@ -369,6 +463,30 @@ int main() {
                     monitor_highlight = 0; monitor_scroll = 0;
                     mode_highlight = 0; mode_scroll = 0;
                     rate_highlight = 0; rate_scroll = 0;
+                    needs_redraw = true;
+                }
+                break;
+
+            case 'p':
+            case 'P':
+                if (state == STATE_MONITOR_SELECT && connected_count > 1) {
+                    state = STATE_POSITION_SELECT;
+
+                    // Build the list of target monitors (all except the selected one)
+                    free(position_target_displays); // free previous list if any
+                    position_target_count = connected_count - 1;
+                    position_target_displays = malloc(position_target_count * sizeof(Display*));
+                    if (!position_target_displays) { /* TODO: error handling */ exit(1); }
+
+                    int current_target = 0;
+                    for (int i = 0; i < connected_count; i++) {
+                        if (i == monitor_highlight) continue;
+                        position_target_displays[current_target++] = connected_displays[i];
+                    }
+
+                    pos_panel_focus = POS_PANEL_TARGET;
+                    pos_target_highlight = 0;
+                    pos_direction_highlight = 0;
                     needs_redraw = true;
                 }
                 break;
@@ -400,6 +518,14 @@ int main() {
                             } else if (mode_highlight >= d->mode_count - 1) { // Wrapped to bottom
                                 mode_scroll = (d->mode_count > right_panel_view_height) ? d->mode_count - right_panel_view_height : 0;
                             }
+                        }
+                    } else if (state == STATE_POSITION_SELECT) {
+                        if (pos_panel_focus == POS_PANEL_TARGET) {
+                            if (position_target_count > 0) {
+                                pos_target_highlight = (pos_target_highlight == 0) ? position_target_count - 1 : pos_target_highlight - 1;
+                            }
+                        } else { // POS_PANEL_DIRECTION
+                            pos_direction_highlight = (pos_direction_highlight == 0) ? position_direction_count - 1 : pos_direction_highlight - 1;
                         }
                     } else { // STATE_RATE_SELECT
                         Display* d = connected_displays[monitor_highlight];
@@ -443,6 +569,14 @@ int main() {
                                 mode_scroll = 0;
                             }
                         }
+                    } else if (state == STATE_POSITION_SELECT) {
+                        if (pos_panel_focus == POS_PANEL_TARGET) {
+                            if (position_target_count > 0) {
+                                pos_target_highlight = (pos_target_highlight + 1) % position_target_count;
+                            }
+                        } else { // POS_PANEL_DIRECTION
+                            pos_direction_highlight = (pos_direction_highlight + 1) % position_direction_count;
+                        }
                     } else { // STATE_RATE_SELECT
                         Display* d = connected_displays[monitor_highlight];
                         if (d->mode_count > 0) {
@@ -459,6 +593,13 @@ int main() {
                     }
                 }
                 needs_redraw = true;
+                break;
+            
+            case 9: // Tab key
+                if (state == STATE_POSITION_SELECT) {
+                    pos_panel_focus = (pos_panel_focus == POS_PANEL_TARGET) ? POS_PANEL_DIRECTION : POS_PANEL_TARGET;
+                    needs_redraw = true;
+                }
                 break;
 
             case KEY_RIGHT:
@@ -480,7 +621,13 @@ int main() {
 
             case KEY_LEFT:
             case 'h':
-                if (state == STATE_RATE_SELECT) {
+                if (state == STATE_POSITION_SELECT) {
+                    state = STATE_MONITOR_SELECT;
+                    free(position_target_displays);
+                    position_target_displays = NULL;
+                    position_target_count = 0;
+                    needs_redraw = true;
+                } else if (state == STATE_RATE_SELECT) {
                     state = STATE_MODE_SELECT;
                     rate_highlight = 0; rate_scroll = 0;
                     needs_redraw = true;
@@ -502,6 +649,29 @@ int main() {
                     state = STATE_RATE_SELECT;
                     rate_highlight = 0; rate_scroll = 0;
                     needs_redraw = true;
+                } else if (state == STATE_POSITION_SELECT) {
+                    // Get selected items
+                    Display* source_display = connected_displays[monitor_highlight];
+                    Display* target_display = position_target_displays[pos_target_highlight];
+                    const char* direction = position_directions[pos_direction_highlight];
+
+                    apply_position_settings(source_display, target_display, direction);
+
+                    cleanup_display_data(displays, display_count, menu_items, connected_displays);
+                    free(position_target_displays);
+                    position_target_displays = NULL;
+
+                    if (!setup_display_data(&displays, &display_count, &menu_items, &num_items, &connected_displays, &connected_count)) {
+                        cleanup_ncurses();
+                        fprintf(stderr, "Failed to re-parse xrandr data after position change.\n");
+                        return 1;
+                    }
+
+                    state = STATE_MONITOR_SELECT;
+                    monitor_highlight = 0; monitor_scroll = 0;
+                    mode_highlight = 0; mode_scroll = 0;
+                    rate_highlight = 0; rate_scroll = 0;
+                    needs_redraw = true;
                 } else if (state == STATE_RATE_SELECT) {
                     // Get selected items
                     Display* selected_display = connected_displays[monitor_highlight];
@@ -513,6 +683,8 @@ int main() {
 
                     // Clean up old data structures
                     cleanup_display_data(displays, display_count, menu_items, connected_displays);
+                    free(position_target_displays);
+                    position_target_displays = NULL;
 
                     // Reparse and rebuild menus with the new/updated data
                     if (!setup_display_data(&displays, &display_count, &menu_items, &num_items, &connected_displays, &connected_count)) {
@@ -537,6 +709,7 @@ end_loop:
     cleanup_ncurses();
 
     cleanup_display_data(displays, display_count, menu_items, connected_displays);
+    free(position_target_displays);
     printf("myrandr exited cleanly.\n");
 
     return 0;
