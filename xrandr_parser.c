@@ -94,6 +94,27 @@ Display* parse_xrandr_output(int *display_count) {
 
             if (strstr(line, " connected")) {
                 current_display_ptr->connected = 1;
+                int matches = 0;
+                if (strstr(line, " primary")) {
+                    current_display_ptr->is_primary = 1;
+                    matches = sscanf(line, "%s connected primary %dx%d+%d+%d",
+                           current_display_ptr->name,
+                           &current_display_ptr->width, &current_display_ptr->height,
+                           &current_display_ptr->x_offset, &current_display_ptr->y_offset);
+                } else {
+                    current_display_ptr->is_primary = 0;
+                    matches = sscanf(line, "%s connected %dx%d+%d+%d",
+                           current_display_ptr->name,
+                           &current_display_ptr->width, &current_display_ptr->height,
+                           &current_display_ptr->x_offset, &current_display_ptr->y_offset);
+                }
+                if (matches == 5) { // 1 for name, 4 for geometry
+                    current_display_ptr->is_active = 1;
+                } else {
+                    current_display_ptr->is_active = 0;
+                    // If geometry parsing failed, at least get the name
+                    sscanf(line, "%s", current_display_ptr->name);
+                }
             } else {
                 current_display_ptr->connected = 0;
                 sscanf(line, "%s disconnected", current_display_ptr->name);

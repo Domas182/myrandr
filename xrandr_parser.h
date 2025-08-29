@@ -26,6 +26,7 @@ typedef struct {
 typedef struct {
     char name[32];
     int connected;
+    int is_active;
     int is_primary;
     // Current resolution details (if connected)
     int width;

@@ -54,7 +54,7 @@ void draw_border(int rows, int cols, AppState state) {
             break;
         case STATE_MONITOR_SELECT:
         default:
-            help_text = "j/k: Select Display | l/Right/Enter: Select Modes | q: Quit";
+            help_text = "j/k: Select Display | o: On/Off | l/Right/Enter: Select Modes | q: Quit";
             break;
     }
     mvprintw(rows - 1, 2, " %s ", help_text);
@@ -69,19 +69,24 @@ void draw_border(int rows, int cols, AppState state) {
  * @param scroll_offset The starting index for the visible list.
  * @param view_height The maximum number of items to display.
  */
-void draw_monitor_list(const char *items[], int count, int highlight, bool is_active, int scroll_offset, int view_height) {
+void draw_monitor_list(Display *displays[], int display_count, int total_items, int highlight, bool is_active, int scroll_offset, int view_height) {
     int x = 2;
     int y = 2;
     mvprintw(y, x, "DISPLAYS:");
     y++;
 
-    for (int i = 0; i < view_height && (scroll_offset + i) < count; i++) {
+    for (int i = 0; i < view_height && (scroll_offset + i) < total_items; i++) {
         int item_index = scroll_offset + i;
         if (item_index == highlight) {
             // If this list is active, reverse. If not, just make it bold.
             wattron(stdscr, is_active ? A_REVERSE : A_BOLD);
         }
-        mvprintw(y + i, x + 2, "%s", items[item_index]);
+        if (item_index < display_count) {
+            Display* d = displays[item_index];
+            mvprintw(y + i, x + 2, "%s [%s]", d->name, d->is_active ? "On" : "Off");
+        } else {
+            mvprintw(y + i, x + 2, "Exit");
+        }
         if (item_index == highlight) {
             wattroff(stdscr, is_active ? A_REVERSE : A_BOLD);
         }
@@ -164,6 +169,31 @@ void draw_right_panel(const Display *display, AppState state, int mode_highlight
         mvprintw(rate_y + i, rate_col + 2, "%.2fHz%s%s", selected_mode->refresh_rates[item_index].rate, selected_mode->refresh_rates[item_index].is_current ? "*" : "", selected_mode->refresh_rates[item_index].is_preferred ? "+" : "");
         if (item_index == rate_highlight) wattroff(stdscr, A_REVERSE);
     }
+}
+
+/**
+ * @brief Toggles a display on or off using xrandr.
+ * @param display The target display.
+ */
+void toggle_display_power(const Display* display) {
+    char command[256];
+    if (display->is_active) {
+        snprintf(command, sizeof(command), "xrandr --output %s --off", display->name);
+    } else {
+        // --auto will pick the preferred mode and turn it on.
+        snprintf(command, sizeof(command), "xrandr --output %s --auto", display->name);
+    }
+
+    // Temporarily leave ncurses to run the command and see its output
+    def_prog_mode(); // Save ncurses terminal state
+    endwin();
+
+    printf("Running command: %s\n", command);
+    system(command);
+    printf("Press Enter to return to the application.");
+    getchar(); // Wait for user
+
+    reset_prog_mode(); // Restore terminal state
 }
 
 /**
@@ -298,7 +328,7 @@ int main() {
             } else {
                 int monitor_view_height = rows - 4; // border + title
                 draw_border(rows, cols, state);
-                draw_monitor_list((const char **)menu_items, num_items, monitor_highlight, state == STATE_MONITOR_SELECT, monitor_scroll, monitor_view_height);
+                draw_monitor_list(connected_displays, connected_count, num_items, monitor_highlight, state == STATE_MONITOR_SELECT, monitor_scroll, monitor_view_height);
 
                 if (monitor_highlight < connected_count) {
                     draw_right_panel(connected_displays[monitor_highlight], state,
@@ -319,6 +349,29 @@ int main() {
             case 'q':
             case 'Q':
                 goto end_loop;
+
+            case 'o':
+            case 'O':
+                if (state == STATE_MONITOR_SELECT && monitor_highlight < connected_count) {
+                    Display* selected_display = connected_displays[monitor_highlight];
+                    toggle_display_power(selected_display);
+
+                    // Reparse and rebuild menus with the new/updated data
+                    cleanup_display_data(displays, display_count, menu_items, connected_displays);
+                    if (!setup_display_data(&displays, &display_count, &menu_items, &num_items, &connected_displays, &connected_count)) {
+                        cleanup_ncurses();
+                        fprintf(stderr, "Failed to re-parse xrandr data after toggling display.\n");
+                        return 1;
+                    }
+
+                    // Reset UI state to the top, as data has changed
+                    state = STATE_MONITOR_SELECT;
+                    monitor_highlight = 0; monitor_scroll = 0;
+                    mode_highlight = 0; mode_scroll = 0;
+                    rate_highlight = 0; rate_scroll = 0;
+                    needs_redraw = true;
+                }
+                break;
 
             case KEY_RESIZE:
                 needs_redraw = true;
