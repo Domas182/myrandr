@@ -44,6 +44,7 @@ The interface is navigated primarily using vim-like keys.
 *   **Main Display List:**
     *   `o`: Toggle the selected display on (`--auto`) or off (`--off`).
     *   `p`: Open the positioning panel for the selected display (only available if more than one monitor is connected).
+    *   `m`: Set the selected display as the primary display.
 
 *   **Positioning Panel:**
     *   `Tab`: Switch focus between the "Target Monitor" list and the "Position" list.

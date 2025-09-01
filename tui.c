@@ -66,7 +66,7 @@ void draw_border(int rows, int cols, AppState state) {
             break;
         case STATE_MONITOR_SELECT:
         default:
-            help_text = "j/k: Select Display | o: On/Off | p: Position | l/Right/Enter: Modes | q: Quit";
+            help_text = "j/k: Select Display | o: On/Off | p: Position | m: Make Primary | l/Right/Enter: Modes | q: Quit";
             break;
     }
     mvprintw(rows - 1, 2, " %s ", help_text);
@@ -265,6 +265,26 @@ void apply_position_settings(const Display* source_display, const Display* targe
     char command[256];
     snprintf(command, sizeof(command), "xrandr --output %s --%s %s --auto",
              source_display->name, direction, target_display->name);
+
+    // Temporarily leave ncurses to run the command
+    def_prog_mode();
+    endwin();
+
+    printf("Running command: %s\n", command);
+    system(command);
+    printf("Press Enter to return to the application.");
+    getchar();
+
+    reset_prog_mode();
+}
+
+/**
+ * @brief Executes the xrandr command to set a display as primary.
+ * @param display The display to set as primary.
+ */
+void set_primary_display(const Display* display) {
+    char command[256];
+    snprintf(command, sizeof(command), "xrandr --output %s --primary", display->name);
 
     // Temporarily leave ncurses to run the command
     def_prog_mode();
@@ -488,6 +508,32 @@ int main() {
                     pos_target_highlight = 0;
                     pos_direction_highlight = 0;
                     needs_redraw = true;
+                }
+                break;
+
+            case 'm':
+            case 'M':
+                if (state == STATE_MONITOR_SELECT && monitor_highlight < connected_count) {
+                    Display* selected_display = connected_displays[monitor_highlight];
+                    if (!selected_display->is_primary) {
+                        set_primary_display(selected_display);
+
+                        // Reparse and rebuild menus with the new/updated data
+                        cleanup_display_data(displays, display_count, menu_items, connected_displays);
+                        free(position_target_displays);
+                        if (!setup_display_data(&displays, &display_count, &menu_items, &num_items, &connected_displays, &connected_count)) {
+                            cleanup_ncurses();
+                            fprintf(stderr, "Failed to re-parse xrandr data after setting primary.\n");
+                            return 1;
+                        }
+
+                        // Reset UI state to the top, as data has changed
+                        state = STATE_MONITOR_SELECT;
+                        monitor_highlight = 0; monitor_scroll = 0;
+                        mode_highlight = 0; mode_scroll = 0;
+                        rate_highlight = 0; rate_scroll = 0;
+                        needs_redraw = true;
+                    }
                 }
                 break;
 
